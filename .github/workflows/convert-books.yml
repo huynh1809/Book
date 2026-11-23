@@ -1,0 +1,95 @@
+name: Convert Books to AZW3
+
+on:
+  push:
+    paths:
+      - '**/*.pdf'
+      - '**/*.epub'
+      - '!**/*.azw3'
+  workflow_dispatch: # Cho phép bấm nút "Run workflow" thủ công trên web nếu muốn
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for unconverted PDF or EPUB files
+        id: check_trigger
+        run: |
+          # Quét xem trong repo có file .pdf hoặc .epub nào chưa được chuyển đổi không
+          FILES=$(find . -type f \( -iname "*.pdf" -o -iname "*.epub" \) ! -path "*/.*")
+          if [ -z "$FILES" ]; then
+            echo ">>> Không có file PDF hoặc EPUB nào trong repo cần xử lý. Dừng workflow."
+            echo "SHOULD_RUN=false" >> $GITHUB_ENV
+          else
+            echo ">>> Tìm thấy file cần chuyển đổi sang AZW3:"
+            echo "$FILES"
+            echo "SHOULD_RUN=true" >> $GITHUB_ENV
+          fi
+
+      - name: Install Calibre & system tools
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y calibre
+
+      - name: Set up Python
+        if: env.SHOULD_RUN == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          pip install pymupdf ebooklib
+
+      - name: Convert PDF/EPUB to AZW3 and cleanup
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          python -c "
+          import os, subprocess, sys
+          from pathlib import Path
+
+          targets = []
+          for ext in ('*.pdf', '*.PDF', '*.epub', '*.EPUB'):
+              for p in Path('.').rglob(ext):
+                  if not any(part.startswith('.') for part in p.parts):
+                      if p not in targets:
+                          targets.append(p)
+
+          print(f'Tìm thấy {len(targets)} file cần xử lý.')
+          for t in targets:
+              print(f'>>> Đang chuyển đổi: {t}')
+              res = subprocess.run([sys.executable, 'pdf2epub.py', str(t), '--only-azw3'])
+              if res.returncode != 0:
+                  print(f'Lỗi khi chuyển đổi {t}', file=sys.stderr)
+
+          if targets:
+              with open(os.environ['GITHUB_ENV'], 'a') as f:
+                  f.write('CONVERTED=1\n')
+          "
+
+      - name: Commit and push AZW3 files
+        if: env.CONVERTED == '1'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-convert books to AZW3 [skip ci]"
+            # Kéo commit mới nhất về trước khi push để tránh conflict
+            git pull --rebase origin ${{ github.ref_name }}
+            git push origin ${{ github.ref_name }}
+          else
+            echo "Không có thay đổi mới."
+          fi
